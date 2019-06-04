@@ -20,7 +20,10 @@ let match_pair = function
 	| [a;b] -> (a,b)
 	| ____  -> Error.panic_with "match_pair: not a 2-element list"
 
-let colored cd str = Printf.sprintf "\027[%sm%s\027[0m" cd str
+(* let colored cd str = Printf.sprintf "\027[%sm%s\027[0m" cd str *)
+(* Changed to a more plain text friendly output *)
+let colored cd str = Printf.sprintf "%s" str
+
 
 let green = colored "0;32"
 let purple = colored "0;35"

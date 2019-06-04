@@ -6,6 +6,9 @@ open Abs
 
 module L = LazyList
 
+module S = Set
+         
+
 type checks = {
 	  chk_uninit : bool
 	; chk_dlock  : bool
@@ -129,8 +132,8 @@ let create_cfg (fd:Cil.fundec) eba_fd =
   
 let rec nodes_dot_code (rootn : eba_cfg_node list) =
   match rootn with
-  |hd::xs -> (List.fold_left (fun prev n -> prev ^ string_of_int (List.hd hd.id) ^ "->" ^ (string_of_int n) ^ "\n") "" hd.succ) ^ (nodes_dot_code xs)
-  |[] -> ""
+  |hd::xs -> (List.fold_left (fun prev n -> prev ^ "{\"source\": " ^ string_of_int (List.hd hd.id) ^ ", \"target\": " ^ (string_of_int n) ^ "},\n") "" hd.succ) ^ (nodes_dot_code xs)
+  |[] -> "{\"source\":-1, \"target\":-1}\n"
 
 
 (* String of statements, returns a string for every statemet in the stmts list *)
@@ -158,7 +161,7 @@ let rec string_of_stmts stmts eba_fun =
     | Asm _ -> "ASM" in
 (* String of an statement, returns a string representation of stmt based on its type *)
   let string_of_stmt (stmt:Cil.stmt) = match stmt.skind with
-    | If (e, _, _, _)  -> "if" (*sprint ~width:999 (dprintf "if %a" d_exp e)*)
+    | If (e, _, _, _)  -> "if " ^ string_of_exp e (*sprint ~width:999 (dprintf "if %a" d_exp e)*)
     | Loop _ -> "loop"
     | Break _ -> "break"
     | Continue _ -> "continue"
@@ -173,6 +176,82 @@ let rec string_of_stmts stmts eba_fun =
   match stmts with
   |(i,stmts)::sx -> string_of_int i ^ " -> " ^ List.fold_left (fun prev stmt -> prev ^ (string_of_stmt stmt) ^ "\n") "" stmts ^ string_of_stmts sx eba_fun
   | [] -> ""
+
+(******************** Lock/Unlock filter  ********************)
+        
+let rec lock_unlock_calls stmts =
+  let is_lock_unlock (inst:Cil.instr) =
+    let calls_of_interest = ["mutex_lock";"mutex_lock_nested";"mutex_lock_interruptible_nested";
+                             "mutex_unlock";"_spin_lock";"_raw_spin_lock";"_spin_unlock";
+                             "_raw_spin_unlock";"__raw_spin_unlock";"__raw_spin_trylock";
+                             "_raw_read_lock";"__raw_read_unlock";"_raw_spin_lock_irq";
+                             "_raw_spin_unlock_irq";"__raw_spin_unlock_irq";"_raw_spin_lock_irqsave";
+                             "_raw_spin_unlock_irqrestore";"_raw_spin_lock_bh";"_raw_spin_unlock_bh";
+                            "spin_unlock_irqrestore"] in
+    match inst with
+    | Call (l, e, args,_) -> (match e with
+                              |Lval (Var name,_) -> List.exists (fun lu -> lu = name.vname) calls_of_interest
+                              |_ -> false)
+    | _ -> false in
+  let rec find_lock_unlock (stmt:Cil.stmt) = match stmt.skind with
+    | Loop (block, _,_,_) -> List.concat (List.map (find_lock_unlock) block.bstmts)
+    | Instr i -> (let locks = List.filter is_lock_unlock i in
+                 match locks with
+                 |_::sx -> [stmt]
+                 |[] -> [])
+    | Block b -> List.concat (List.map (find_lock_unlock) b.bstmts)
+    |_ -> [] in
+  let rec basic_block_stmts block_stmts = match block_stmts with
+    |(i,stmts):: xs -> (i,List.concat ( List.map (find_lock_unlock) stmts)) :: basic_block_stmts xs
+    | [] -> [] in
+  List.filter (fun (_,l) -> (List.length l) <> 0) (basic_block_stmts stmts)
+
+(******************** End: Lock/Unlock filter  ********************)
+  
+
+(******************** CFG selection ********************)
+        
+
+(**** DFS CFG Node ****)
+type dfs_cfg_node =
+  {
+    eba_node :eba_cfg_node;
+    mutable visited : int;
+  }
+
+(******** Returns a sub graph (sub-CFG) from a giving node source (s) to a target node (t) ********)
+let sub_cfg cfg source sink =
+  (* Comparition between two dfs-ready nodes, used in sorting the dfs-ready cfg *)
+  let dfs_cmp dfs1 dfs2 = if dfs1.eba_node.id < dfs2.eba_node.id then (-1) else if dfs1.eba_node.id > dfs2.eba_node.id then 1 else 0 in
+  (* Returns a dfs ready cfg from an original cfg *)
+  let dfs_from_cfg graph = List.sort dfs_cmp (List.map (fun cfg_node -> {eba_node = cfg_node; visited = 0}) graph) in
+  (* Finds a node in a dfs-ready cfg *)
+  let node dfs (node:int)  = List.filter (fun dfs_node -> if List.hd (dfs_node.eba_node.id) = node then true else false) dfs |> List.hd in
+  (* Returns a forward direction *)
+  let dir_forward dfs_node = dfs_node.eba_node.succ in
+  (* Returns a backward direction *)
+  let dir_backward dfs_node = dfs_node.eba_node.predc in
+  (* Updates the dfs mark of the nodes *)
+  let rec  update_nodes nodes = match nodes with
+      [] -> []
+    | hd :: xs -> hd.visited <- 1; hd :: update_nodes xs in
+  (* DFS following the edges in the given 'direction' returns the DFS spanning subgraph (plus exit nodes numbers) *)
+  let rec dfs (stack:dfs_cfg_node list) direction dfs_graph graph = match stack with
+      [] -> dfs_graph
+    | curnt :: xs -> curnt.visited <- 2; dfs (List.append xs (update_nodes (List.filter (fun node -> if node.visited < 1 then true else false)
+                                                                             (List.map (fun id -> node graph id) (direction curnt)))))
+                                          direction (List.append dfs_graph [curnt.eba_node]) graph in
+  let f_graph = dfs_from_cfg cfg in
+  let b_graph = dfs_from_cfg cfg in
+  let src = node f_graph source in
+  let sk = node b_graph sink in
+  let forward_dfs = dfs [src] dir_forward [] (dfs_from_cfg cfg) in
+  let backward_dfs = dfs [sk] dir_backward [] (dfs_from_cfg cfg) in
+  let forward_set = List.fold_right S.add forward_dfs S.empty in
+  let backward_set = List.fold_right S.add backward_dfs S.empty in
+  S.elements (S.intersect forward_set backward_set)
+  
+  
   
   
 (******* Entry point ******)        
@@ -183,15 +262,21 @@ let dump_cfg cil_file gcc_filename eba_file =
   (*Dumps dot format basic code for all nodes from the root node*)
   Cil.iterGlobals cil_file (fun g ->
       (*************************** 'when' added just for testing purposes ***************)
-      match g with GFun(fd, _) (*when fd.svar.vname = "get_domain_for_dev"*) ->
+      match g with GFun(fd, _) when fd.svar.vname = "get_domain_for_dev" ->
                     (*Dump .dot file *)
                  (*Cfg.printCfgFilename (gcc_filename ^"."^(fd.svar.vname)^".dot") fd*)
                  (* Printf.printf "%s\n" fd.svar.vname; create_cfg fd;()*)
                     let filename = gcc_filename ^ "."^(fd.svar.vname)^".dot" in
                     let chan = open_out filename in
-                    let (rootn, stmts,Some(_,ebaFun))  = create_cfg fd eba_file in
-                    Printf.printf "digraph CFG_%s {\n %s}\n" fd.svar.vname (nodes_dot_code rootn);
-                    Printf.printf "%s" (string_of_stmts stmts ebaFun)
+                    let (rootn,stmts,Some(_,ebaFun))  = create_cfg fd eba_file in
+                    let locks_unlocks = lock_unlock_calls stmts in
+                    let subg = sub_cfg rootn 9 18 in
+                    Printf.printf "\"edges\": [\n %s ]\n" (nodes_dot_code rootn);
+                    (*Printf.printf "digraph CFG_%s {\n %s}\n" fd.svar.vname (nodes_dot_code rootn);*)
+                    Printf.printf "%s" (string_of_stmts (stmts) ebaFun);
+                    Printf.printf "\"edges\": [\n %s ]\n" (nodes_dot_code subg);
+                    
+                    
                  | _ -> ())
 
                                                 (******** End: EBA-CIL CFG **********)
@@ -202,7 +287,7 @@ let infer_file checks fn =
 	if Opts.Get.save_abs()
 	then begin
 		let fn_abs = fn ^ ".abs" in
-		File.with_file_out fn_abs (fun out -> AFile.fprint out fileAbs)
+		File.with_file_out fn_abs (fun out -> AFile.fprint out fileAbs);
                 dump_cfg file fn fileAbs
 	end;
 	run_checks checks file fileAbs;

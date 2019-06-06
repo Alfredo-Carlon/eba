@@ -198,10 +198,10 @@ let rec lock_unlock_calls stmts =
   let is_lock_unlock (inst:Cil.instr) =
     let lock_calls = ["mutex_lock";"mutex_lock_nested";"mutex_lock_interruptible_nested";
                       "_spin_lock";"_raw_spin_lock";"__raw_spin_trylock";"_raw_read_lock";
-                      "_raw_spin_lock_irq";"_raw_spin_lock_irqsave";"_raw_spin_lock_bh"] in
+                      "_raw_spin_lock_irq";"_raw_spin_lock_irqsave";"_raw_spin_lock_bh";"spin_lock"] in
     let unlock_calls = ["mutex_unlock";"_spin_unlock";"_raw_spin_unlock";"__raw_spin_unlock";
                         "__raw_read_unlock";"_raw_spin_unlock_irq";"__raw_spin_unlock_irq";
-                       "_raw_spin_unlock_irqrestore";"_raw_spin_unlock_bh";"spin_unlock_irqrestore"] in
+                       "_raw_spin_unlock_irqrestore";"_raw_spin_unlock_bh";"spin_unlock_irqrestore";"spin_unlock"] in
     match inst with
     | Call (l, e, args,_) -> (match e with
                               |Lval (Var name,_) -> (
@@ -336,7 +336,7 @@ let dump_cfg cil_file gcc_filename eba_file =
   (*Dumps dot format basic code for all nodes from the root node*)
   Cil.iterGlobals cil_file (fun g ->
       (*************************** 'when' added just for testing purposes ***************)
-      match g with GFun(fd, _) when fd.svar.vname = "domain_context_mapping_one" ->
+      match g with GFun(fd, _) (*when fd.svar.vname = "domain_context_mapping_one"*) ->
                     (*Dump .dot file *)
                  (*Cfg.printCfgFilename (gcc_filename ^"."^(fd.svar.vname)^".dot") fd*)
                  (* Printf.printf "%s\n" fd.svar.vname; create_cfg fd;()*)
@@ -352,16 +352,18 @@ let dump_cfg cil_file gcc_filename eba_file =
                         let locks_unlocks = lock_unlock_calls stmts in
                         if List.length locks_unlocks = 0 then () else
                           (
-                            (* Code for just dumping statics when processing a file. Used to check the whole kernel
-                            ********************
-                            let filename = "/home/alfredo/Work/EBA/Kernel_locks/"^gcc_filename^".locks" in
+                            (*Code for just dumping statics when processing a file. Used to check the whole kernel*)
+                            (********************)
+                            (*let stripped_fn = String.sub gcc_filename 17 ((String.length gcc_filename)-17) in*)
+                            let stripped_fn = gcc_filename in
+                            let filename = "/home/alfredo/Work/EBA/Kernel_locks/"^(String.map (fun d -> if d = '/' then '_' else d)stripped_fn)^".locks" in
                             let chan = open_out_gen [Open_append; Open_creat] 0o666 filename in
                             Printf.fprintf chan "Fun: %s\n"  fd.svar.vname;
                             print_calls locks_unlocks chan;
                             close_out chan
-                            ********************
-                            *)
-                          (* Code for manually dumping the areas of interest for any given function *)
+                          (*********************)
+                            
+                          (* Code for manually dumping the areas of interest for any given function
                             let subg1 = sub_cfg rootn 18 20 in
                             let subg2 = sub_cfg rootn 18 37 in
                             let subg3 = sub_cfg rootn 18 47 in
@@ -381,7 +383,7 @@ let dump_cfg cil_file gcc_filename eba_file =
                             Printf.fprintf chan "%s:%s" fd.svar.vname full_output;
                             Printf.printf "%s" full_output;
                             close_out chan
-                            
+                           *)
                             (*let subg = sub_cfg rootn 9 18 in
                             let rec trace_print trace = match trace with
                               |[] -> "\n"

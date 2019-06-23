@@ -77,10 +77,12 @@ type eba_cfg =
     data : eba_cfg_data list;
   }
 
+(******************************** CFG Creation *******************************)  
 let create_cfg (fd:Cil.fundec) eba_fd =
   let basic_cfg = List.map (fun (stmt:Cil.stmt) ->
                       let sid_proj (x:Cil.stmt) = x.sid in
-                      {id = stmt.sid::[]; predc = List.map sid_proj stmt.preds; succ = List.map sid_proj stmt.succs}) fd.sallstmts in
+                      {id = stmt.sid::[]; predc = List.map sid_proj stmt.preds;
+                       succ = List.map sid_proj stmt.succs}) fd.sallstmts in
 
   let eq_ x y = x=y in
   let rec find_node n_id ccfg  = match ccfg with
@@ -90,19 +92,24 @@ let create_cfg (fd:Cil.fundec) eba_fd =
           | [] -> assert false (*Should not happen *) in
   (* Merge the cfg nodes *)
   let rec merge_cfg (cfg:eba_cfg_node list) =
-    let branch_nodes = List.map (fun n -> List.hd n.id) (List.filter (fun (node:eba_cfg_node ) -> (List.length node.succ) > 1) cfg) in
+    let branch_nodes = List.map (fun n -> List.hd n.id)
+                         (List.filter (fun (node:eba_cfg_node ) -> (List.length node.succ) > 1) cfg) in
     (**** Mergable nodes fulfill:
           1. They have only one predecessor.
           2. They have only one successor.
           3. The predecessor is not a branch node *****)
     (**** Fix point merging ****)
-    try let mergable = List.find (fun (node:eba_cfg_node) -> (List.length node.predc) = 1 &&
-                                                               (List.length node.succ) = 1 &&
-                                                                 not (List.exists (eq_ (List.hd node.predc)) branch_nodes))cfg in
+    try let mergable = List.find (fun (node:eba_cfg_node) ->
+                           (List.length node.predc) = 1 &&
+                             (List.length node.succ) = 1 &&
+                               not (List.exists (eq_ (List.hd node.predc)) branch_nodes))cfg in
         let pred_node = find_node (List.hd mergable.predc) cfg in
-        let new_node = {id = List.append pred_node.id mergable.id; predc = pred_node.predc; succ = ((List.hd mergable.succ) ::
-                                                                                              (List.filter (fun n -> not (n = List.hd mergable.id)) pred_node.succ))} in
-        let new_cfg = new_node :: (List.filter (fun (node:eba_cfg_node) -> not (List.exists (fun n -> (n = List.hd mergable.id) || (n = List.hd pred_node.id))node.id)) cfg) in
+        let new_node = {id = List.append pred_node.id mergable.id; predc = pred_node.predc;
+                        succ = ((List.hd mergable.succ) ::
+                                  (List.filter (fun n -> not (n = List.hd mergable.id)) pred_node.succ))} in
+        let new_cfg = new_node :: (List.filter (fun (node:eba_cfg_node) ->
+                                       not (List.exists (fun n -> (n = List.hd mergable.id) || (n = List.hd pred_node.id))
+                                              node.id)) cfg) in
         merge_cfg new_cfg
     with Not_found -> cfg in
   (* Collapse long names *)
@@ -116,23 +123,35 @@ let create_cfg (fd:Cil.fundec) eba_fd =
       | (merged, label)::xs -> if List.exists (fun merged_id -> merged_id = id) merged then label else find_tag xs id
       | [] -> assert false (*Should not happen*) in
     (* Actual re-labeling *)
-    (dictionary, List.map (fun (node:eba_cfg_node) -> {id = [find_tag dictionary (List.hd node.id)]; predc = List.map (find_tag dictionary) node.predc;
-                                          succ = List.map (find_tag dictionary) node.succ;}) cfg )in
+    (dictionary, List.map (fun (node:eba_cfg_node) -> {id = [find_tag dictionary (List.hd node.id)];
+                                                       predc = List.map (find_tag dictionary) node.predc;
+                                                       succ = List.map (find_tag dictionary) node.succ;}) cfg )in
   let rec fill_cil dictionary = match dictionary with
-    |(tags, i)::xs -> (i,List.map (fun nid -> List.find (fun (stmt:Cil.stmt) -> stmt.sid = nid) fd.sallstmts) tags)::fill_cil xs
+    |(tags, i)::xs -> (i,List.map (fun nid -> List.find (fun (stmt:Cil.stmt) -> stmt.sid = nid)
+                                                fd.sallstmts) tags)::fill_cil xs
     |[] -> [] in
 
   (*let rec fill_eba = List.map (fun stmt -> AFun.shape_of eba_fd stmt) fd.slocals  in*)
     
   let (dictionary, graph) = collapse_names (merge_cfg basic_cfg) in
-  let (g,d) = (graph, fill_cil dictionary) in
-  (* Testing to find out EBA's structure *)
-  (g,d,AFile.find_fun eba_fd fd.svar)
-  
+  (graph, fill_cil dictionary)
+
+(******************************** End: CFG Creation *******************************)
+
+(******************************** Dictionary toos *********************************)
+
+let statements_at_index stmts index =
+  try List.find (fun (i,a) -> if i = index then true else false) stmts
+  with Not_found -> raise Not_found
+    
+
+(******************************** Dictionary toos *********************************)
+
   
 let rec nodes_dot_code (rootn : eba_cfg_node list) =
   match rootn with
-  |hd::xs -> (List.fold_left (fun prev n -> prev ^ "{\"source\": " ^ string_of_int (List.hd hd.id) ^ ", \"target\": " ^ (string_of_int n) ^ "},\n") "" hd.succ) ^ (nodes_dot_code xs)
+  |hd::xs -> (List.fold_left (fun prev n -> prev ^ "{\"source\": " ^ string_of_int (List.hd hd.id) ^ ", \"target\": " ^
+                                              (string_of_int n) ^ "},\n") "" hd.succ) ^ (nodes_dot_code xs)
   |[] -> "{\"source\":-1, \"target\":-1}\n"
 
 
@@ -156,17 +175,17 @@ let rec string_of_stmts stmts eba_fun =
   in
   (* String of an instruction *)
   let string_of_inst (inst:Cil.instr) = match inst with
-    | Set (l,e,loc) -> (*"Set: " ^ string_of_set l ^*) Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
-    | Call (l, e, args,loc) -> (*"Call: " ^ string_of_exp e ^*) Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
+    | Set (l,e,loc) -> (*"Set: " ^ string_of_set l ^*) "SET " ^ string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
+    | Call (l, e, args,loc) -> (*"Call: " ^ string_of_exp e ^*) "CALL " ^ string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
     | Asm _ -> (*"ASM"*) "" in
 (* String of an statement, returns a string representation of stmt based on its type *)
   let string_of_stmt (stmt:Cil.stmt) = match stmt.skind with
-    | If (e, _, _, l)  -> (*"if " ^ string_of_exp e*) (*"if" ^*) Type.Effects.to_string (AFun.effect_of_expr eba_fun l) (*sprint ~width:999 (dprintf "if %a" d_exp e)*)
+    | If (e, _, _, l)  -> (*"if " ^ string_of_exp e*) (*"if" ^*) Type.Effects.to_string (AFun.effect_of_expr eba_fun l)
     | Loop _ -> (*"loop"*) ""
     | Break _ -> (*"break"*) ""
     | Continue _ -> (*"continue"*) ""
     | Goto _ | ComputedGoto _ -> (*"goto"*) ""
-    | Instr i -> List.fold_left (^) "" (List.map (fun i -> "\t"^ string_of_inst i ^ "\n") i )
+    | Instr i -> List.fold_left (^) "INST" (List.map (fun i -> "\t"^ string_of_inst i ^ "\n") i )
     | Switch _ -> (*"switch"*) ""
     | Block _ -> (*"block"*) ""
     | Return _ -> (*"return"*) ""
@@ -174,65 +193,11 @@ let rec string_of_stmts stmts eba_fun =
     | TryFinally _ -> (*"try-finally"*) "" in
 
   match stmts with
-  |(i,stmts)::sx -> (*string_of_int i ^ " -> " ^*) List.fold_left (fun prev stmt -> prev ^ (string_of_stmt stmt) ^ "\n") "" stmts ^ string_of_stmts sx eba_fun
+  |(i,stmts)::sx -> string_of_int i ^ " -> " ^
+                      List.fold_left (fun prev stmt -> prev ^ (string_of_stmt stmt) ^ "\n")
+                        "" stmts ^ string_of_stmts sx eba_fun
   | [] -> ""
 
-(******************** Lock/Unlock filter  ********************)
-
-type lock_call = {
-    (*The name of the lock *)
-    lock_name : string;
-    (* The basick block in which the lock takes place *)
-    mutable lock_bb : int;
-  }
-type unlock_call = {
-    lock_name : string;
-    mutable lock_bb : int;
-  }
-type locking_call =
-  | Lock of lock_call
-  | Unlock of unlock_call
-  | None
-  
-let rec lock_unlock_calls stmts =
-  let is_lock_unlock (inst:Cil.instr) =
-    let lock_calls = ["mutex_lock";"mutex_lock_nested";"mutex_lock_interruptible_nested";
-                      "_spin_lock";"_raw_spin_lock";"__raw_spin_trylock";"_raw_read_lock";
-                      "_raw_spin_lock_irq";"_raw_spin_lock_irqsave";"_raw_spin_lock_bh";"spin_lock"] in
-    let unlock_calls = ["mutex_unlock";"_spin_unlock";"_raw_spin_unlock";"__raw_spin_unlock";
-                        "__raw_read_unlock";"_raw_spin_unlock_irq";"__raw_spin_unlock_irq";
-                       "_raw_spin_unlock_irqrestore";"_raw_spin_unlock_bh";"spin_unlock_irqrestore";"spin_unlock"] in
-    match inst with
-    | Call (l, e, args,_) -> (match e with
-                              |Lval (Var name,_) -> (
-                                if not (List.exists (fun lu -> lu = name.vname) lock_calls) &&
-                                     not (List.exists (fun lu -> lu = name.vname) unlock_calls) then
-                                  None
-                                else
-                                  (
-                                    if List.exists (fun lu -> lu = name.vname) lock_calls then
-                                      Lock {lock_name = "h"; lock_bb = 0}
-                                    else
-                                      Unlock {lock_name="b"; lock_bb=0}
-                                  )
-                              )
-                              |_ -> None)
-    | _ -> None in
-  let rec find_lock_unlock (stmt:Cil.stmt) = match stmt.skind with
-    | Loop (block, _,_,_) -> List.concat (List.map (find_lock_unlock) block.bstmts)
-    | Instr i -> (let locks = List.filter (fun k -> if ((is_lock_unlock k) = None) then false else true) i in
-                 match locks with
-                 |_::sx -> [stmt]
-                 |[] -> [])
-    | Block b -> List.concat (List.map (find_lock_unlock) b.bstmts)
-    |_ -> [] in
-  let rec basic_block_stmts block_stmts = match block_stmts with
-    |(i,stmts):: xs -> (i,List.concat ( List.map (find_lock_unlock) stmts)) :: basic_block_stmts xs
-    | [] -> [] in
-  List.filter (fun (_,l) -> (List.length l) <> 0) (basic_block_stmts stmts)
-
-(******************** End: Lock/Unlock filter  ********************)
-  
 
 (******************** CFG selection ********************)
         
@@ -245,12 +210,14 @@ type bfs_cfg_node =
   }
 
 (* Comparition between two bfs-ready nodes, used in sorting the bfs-ready cfg *)
-let bfs_cmp bfs1 bfs2 = if bfs1.eba_node.id < bfs2.eba_node.id then (-1) else if bfs1.eba_node.id > bfs2.eba_node.id then 1 else 0
+let bfs_cmp bfs1 bfs2 = if bfs1.eba_node.id < bfs2.eba_node.id then (-1) else
+                          if bfs1.eba_node.id > bfs2.eba_node.id then 1 else 0
 (* Returns a bfs ready cfg from an original cfg *)
 let bfs_from_cfg graph = List.sort bfs_cmp (List.map (fun cfg_node -> {eba_node = cfg_node; visited = 0}) graph)
 
 (* Finds a node in a bfs-ready cfg *)
-let node bfs (node:int) = List.filter (fun bfs_node -> if List.hd (bfs_node.eba_node.id) = node then true else false) bfs |> List.hd
+let node bfs (node:int) = List.filter (fun bfs_node -> if List.hd (bfs_node.eba_node.id) = node then true else false)
+                            bfs |> List.hd
                        
 (******** Returns a sub graph (sub-CFG) from a giving node source (s) to a target node (t) ********)
 let sub_cfg cfg source sink =
@@ -295,6 +262,8 @@ let sub_cfg cfg source sink =
     let filter_connects l = List.filter (fun i -> List.exists (fun j -> (List.hd (j.id)) = i) sub_graph) l in
     {id = node.id; predc = filter_connects node.predc; succ = filter_connects node.succ} in
   List.map sub_node sub_graph
+
+(******** End: Returns a sub graph (sub-CFG) from a giving node source (s) to a target node (t) ********)  
   
 (******** Returns all the execution traces within cfg rooted at a given node (source) ********)
 type trace_cfg_node =
@@ -304,7 +273,6 @@ type trace_cfg_node =
     mutable succ : int list;
   }
 let execution_traces cfg source =
-  (*Fixpoint calculation of execution traces *)
   let exec_ready = List.map (fun node -> {t_id = node.id; predc = node.predc; succ = node.succ}) cfg in
   let rec explore stack graph exec_traces =
     match stack with
@@ -314,7 +282,8 @@ let execution_traces cfg source =
                        and continue up *)
                    |[] -> (let curnt_node qnode = List.find (fun i -> List.hd i.id = List.hd qnode.t_id) cfg in
                            if List.length (curnt_node node).succ > 1 then explore xs graph exec_traces else
-                             if List.length (curnt_node node).succ = 0 then explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
+                             if List.length (curnt_node node).succ = 0 then
+                               explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
                              else (
                                let suc = List.hd (curnt_node node).succ in
                                if List.exists (fun s -> if List.hd s.t_id = suc then true else false) stack then
@@ -323,84 +292,265 @@ let execution_traces cfg source =
                                  explore xs graph exec_traces
                              )
                           )
-                   |hd::ts -> node.succ <- ts; explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                   |hd::ts -> node.succ <- ts;
+                              explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
                    ) in
   explore [List.find (fun n -> List.hd n.t_id = source) exec_ready] exec_ready []
-(******** End: Returns all the execution traces within cfg rooted at a given node (source) ********)  
+(******** End: Returns all the execution traces within cfg rooted at a given node (source) ********)
+
+
+(******** Returns a string of all the effects of all the given traces ********)
+let string_of_traces traces ebaFun stmts =
+  let output_effects trace =
+    (*Outputs the effects of all the instructions in all blocks of the trace *)
+    let bb_string (bb_num:int) =
+      List.fold_left (^) "" (List.map (fun (ind,s) ->
+                                 if ind = bb_num then
+                                   (let stm_str = (string_of_stmts [(ind,s)] ebaFun) in
+                                    if stm_str <> "" then stm_str^"\n" else "")
+                                 else "") stmts  ) in
+    List.fold_left (^) "" (List.map (fun n -> (bb_string n) ^ "\n\n") trace) in
+  List.fold_left (^) ""
+    (List.map (fun trace_set ->
+         List.fold_left (^) ""
+           (List.map (fun trace -> (output_effects trace)^"===============\n\n\n" ) trace_set)) traces)
+
+(******** End: Returns a string of all the effects of all the given traces ********)
+
+
+(******************** Lock/Unlock filter  ********************)
+
+type lock_call = {
+    (*The name of the lock *)
+    lock_name : string;
+    (* The basick block in which the lock takes place *)
+    mutable lock_bb : int;
+  }
+type unlock_call = {
+    lock_name : string;
+    mutable lock_bb : int;
+  }
+type locking_call =
+  | Lock of lock_call
+  | Unlock of unlock_call
+  | None
   
-(******* Entry point ******)        
-(* Dumps .dot files for every function declared in the file
- Note: is file mutated in infer_file?*)
-(* Should be Cil.file -> unit *)
-let dump_cfg cil_file gcc_filename eba_file =
-  (*Dumps dot format basic code for all nodes from the root node*)
+let rec lock_unlock_calls stmts =
+
+  let get_lock_name (args:Cil.exp list) =
+    match args with
+    | Lval (Var name,_)::[] -> name.vname
+    | _ -> "unknown"
+  in
+  
+  
+  let is_lock_unlock bb_ind (inst:Cil.instr) =
+    let lock_calls = ["mutex_lock";"mutex_lock_nested";"mutex_lock_interruptible_nested";
+                      "_spin_lock";"_raw_spin_lock";"__raw_spin_trylock";"_raw_read_lock";
+                      "_raw_spin_lock_irq";"_raw_spin_lock_irqsave";"_raw_spin_lock_bh";"spin_lock";
+                     "spin_lock_irqsave"] in
+    let unlock_calls = ["mutex_unlock";"_spin_unlock";"_raw_spin_unlock";"__raw_spin_unlock";
+                        "_raw_read_unlock";"__raw_read_unlock";"_raw_spin_unlock_irq";"__raw_spin_unlock_irq";
+                        "_raw_spin_unlock_irqrestore";"_raw_spin_unlock_bh";"spin_unlock_irqrestore";"spin_unlock";
+                       "spin_unlock_irqrestore"] in
+    match inst with
+    | Call (l, e, args,_) -> (match e with
+                              |Lval (Var name,_) -> (
+                                if List.exists (fun lu -> lu = name.vname) lock_calls then
+                                  Lock {lock_name = get_lock_name args; lock_bb = bb_ind}
+                                else if List.exists (fun lu -> lu = name.vname) unlock_calls then
+                                  Unlock {lock_name=get_lock_name args; lock_bb=bb_ind}
+                                else
+                                  None
+                              )
+                              |_ -> None)
+    | _ -> None in
+  let rec find_lock_unlock bb_ind (stmt:Cil.stmt) = match stmt.skind with
+    (*| Loop (block, _,_,_) -> List.concat (List.map (find_lock_unlock (bb_ind + 10)) block.bstmts)*)
+    | Instr i -> (List.filter (fun k -> if k = None then false else true)
+                    (List.map (fun k -> is_lock_unlock bb_ind k) i))
+    (*| Block b -> List.concat (List.map (find_lock_unlock (bb_ind+20)) b.bstmts)*)
+    |_ -> [] in
+  let rec basic_block_stmts block_stmts = match block_stmts with
+    |(i,stmts):: xs -> (i,List.concat ( List.map (find_lock_unlock i) stmts)) :: basic_block_stmts xs
+    | [] -> [] in
+  List.filter (fun (_,l) -> (List.length l) <> 0) (basic_block_stmts stmts)
+
+(******************** End: Lock/Unlock filter  ********************)
+  
+  
+type function_query_info =
+  {
+    name : string;
+    cfg : eba_cfg_node list;
+    stmts : (int * Cil.stmt list) list;
+    eba_fun : Abs.AFun.t;
+    mutable lock_unlocks : (int * locking_call list) list ;
+  }
+
+(****************************************************************
+Process each function in the file and returns a hash table:
+name : The name of the function
+cfg : The CFG of the function
+stmts: The statements/basic block
+eba_fun: The Eba's abstraction of the function
+ ****************************************************************)
+let process_functions cil_file eba_file =
+  (*Functions holder table*)
+  let function_table = Hashtbl.create 300 in
   Cil.iterGlobals cil_file (fun g ->
-      (*************************** 'when' added just for testing purposes ***************)
-      match g with GFun(fd, _) (*when fd.svar.vname = "domain_context_mapping_one"*) ->
-                    (*Dump .dot file *)
-                 (*Cfg.printCfgFilename (gcc_filename ^"."^(fd.svar.vname)^".dot") fd*)
-                 (* Printf.printf "%s\n" fd.svar.vname; create_cfg fd;()*)
-                    (*let filename = gcc_filename ^ "."^(fd.svar.vname)^".dot" in
-                    let chan = open_out filename in *)
-                    (* Small function to just print the basic blocks of the locking/unlocking calls *)
-                    let rec print_calls lock_calls out_chan = match lock_calls with
-                      |(i,_)::xs -> Printf.fprintf out_chan "%d " i ; print_calls xs out_chan
-                      |[] -> Printf.fprintf out_chan "\n" in
-                    let (rootn,stmts,Some(_,ebaFun))  = create_cfg fd eba_file in
-                    if List.length rootn < 3 then () else
-                      (
-                        let locks_unlocks = lock_unlock_calls stmts in
-                        if List.length locks_unlocks = 0 then () else
-                          (
-                            (*Code for just dumping statics when processing a file. Used to check the whole kernel*)
-                            (********************)
-                            (*let stripped_fn = String.sub gcc_filename 17 ((String.length gcc_filename)-17) in*)
-                            let stripped_fn = gcc_filename in
-                            let filename = "/home/alfredo/Work/EBA/Kernel_locks/"^(String.map (fun d -> if d = '/' then '_' else d)stripped_fn)^".locks" in
-                            let chan = open_out_gen [Open_append; Open_creat] 0o666 filename in
-                            Printf.fprintf chan "Fun: %s\n"  fd.svar.vname;
-                            print_calls locks_unlocks chan;
-                            close_out chan
-                          (*********************)
-                            
-                          (* Code for manually dumping the areas of interest for any given function
-                            let subg1 = sub_cfg rootn 18 20 in
-                            let subg2 = sub_cfg rootn 18 37 in
-                            let subg3 = sub_cfg rootn 18 47 in
-                            let subg4 = sub_cfg rootn 18 64 in
-                            let subg5 = sub_cfg rootn 64 70 in
-                            let traces = [execution_traces subg1 18; execution_traces subg2 18;execution_traces subg3 18;execution_traces subg4 18;execution_traces subg5 64] in
-                            let output_effects trace =
-                          (*Outputs the effects of all the instructions in all blocks of the trace *)
-                              let bb_string (bb_num:int) =
-                                List.fold_left (^) "" (List.map (fun (ind,s) -> if ind = bb_num then (string_of_stmts [(ind,s)] ebaFun)^"\n" else "") stmts  ) in
-                              List.fold_left (^) "" (List.map (fun n -> (bb_string n) ^ "\n\n") trace) in
-                            let full_output = List.fold_left (^) "" (List.map (fun trace_set ->
-                                                                         List.fold_left (^) "" 
-                                                                         (List.map (fun trace -> (output_effects trace)^"===============\n\n\n" ) trace_set)) traces) in
-                            let filename = "BUG_"^gcc_filename^"_"^fd.svar.vname^".traces" in
-                            let chan = open_out filename in
-                            Printf.fprintf chan "%s:%s" fd.svar.vname full_output;
-                            Printf.printf "%s" full_output;
-                            close_out chan
-                           *)
-                            (*let subg = sub_cfg rootn 9 18 in
-                            let rec trace_print trace = match trace with
-                              |[] -> "\n"
-                              |hd::xs -> string_of_int hd ^" "^ trace_print xs in
-                            Printf.printf "\"edges\": [\n %s ]\n" (nodes_dot_code rootn);
-                        (*Printf.printf "digraph CFG_%s {\n %s}\n" fd.svar.vname (nodes_dot_code rootn);*)
-                            Printf.printf "%s" (string_of_stmts (stmts) ebaFun);
-                            Printf.printf "Traces: \n %s" (List.fold_left (^) "" (List.map trace_print (execution_traces subg 9)));
-                            Printf.printf "\"edges\": [\n %s ]\n" (nodes_dot_code subg); *)
-                          )
-                      )
-                    
-                    
-                 | _ -> ())
+      match g with
+      | GFun(fd,_) ->
+         (let (cfg_root, stmts_list) = create_cfg fd eba_file in
+          let f = AFile.find_fun eba_file fd.svar in
+          (*Find eba's function abstraction*)
+          match f with
+          |Some(_,ebaFun) -> Hashtbl.add function_table fd.svar.vname
+                               {name=fd.svar.vname;cfg=cfg_root;stmts=stmts_list;eba_fun=ebaFun;lock_unlocks=[];}
+          |None -> raise Not_found (*Should never happen*)
+         )
+      | _ -> ()
+    );
+  function_table
 
-                                                (******** End: EBA-CIL CFG **********)
+(****************************************************************
+Returns all the effects for a given trace.
+*****************************************************************)
 
+let effects_for_trace eba_fun (statements:(int * Cil.stmt list) list) =
+  List.map (fun bb_id ->
+      let (_,bb_statements) = statements_at_index statements bb_id in
+      List.map (fun (s:Cil.stmt) ->
+          AFun.effect_of_expr eba_fun (Cil.get_stmtLoc s.skind)) bb_statements)
+
+  
+(****************************************************************
+Process a function to calculate its locks and unlocks nodes, its traces 
+ *****************************************************************)
+  
+(********************* Initial 'interesting' functions filter *********************)
+let get_interesting_funs funs_dir =
+  let filtered = Hashtbl.copy funs_dir in
+  Hashtbl.filter_map_inplace (fun fname (data:function_query_info) ->
+      if List.length data.cfg < 3 then None
+      else
+        let lu = lock_unlock_calls data.stmts in
+        if List.length lu <> 0 then
+          (
+          (*It is an interesting function*)
+            data.lock_unlocks <- lu;
+            Some data
+          )
+        else
+          None
+    ) filtered;
+  filtered
+(********************* End: Initial 'interesting' functions filter *********************)
+
+(********************* Initial lock/unlock traces queries *********************)
+
+let lock_unlock_queries file_funs =
+
+  (********** Returns yes if inside the list locks_lst there is a locking operation
+              that has the same constructor as op **********)
+  let rec lock_unlock_finder locks_lst op= match locks_lst, op with
+    | (Lock a) as lc ::rs , Lock _ ->lc::lock_unlock_finder rs op
+      |(Unlock a) as lc::rs, Unlock _ ->lc::lock_unlock_finder rs op
+    |_ :: rs, _ -> lock_unlock_finder rs op
+    |[],_ -> [] in
+
+  let rec make_pairs ind l = match l with
+    |xs::rs -> (ind,xs)::make_pairs ind rs
+    |[] -> [] in
+
+  let rec cross_prod l1 l2 = match l1 with
+    | xs::[] -> List.map (fun x -> (xs,x)) l2
+    | xs::rs -> List.append (List.map (fun x -> (xs,x)) l2) (cross_prod rs l2)
+    | [] -> [] in
+  
+  (********** Trace queries generation **********)
+  let rec trace_queries (inter_funs:function_query_info list) aux =
+    match inter_funs with
+    |[] -> aux
+    |func :: rs -> let lock_places = List.concat (List.map (fun (i,a) ->
+                                         make_pairs i (lock_unlock_finder a (Lock {lock_name="foo"; lock_bb=0})))
+                                       func.lock_unlocks) in
+                   let unlock_places = List.concat (List.map (fun (i,a) ->
+                                         make_pairs i (lock_unlock_finder a (Unlock {lock_name="foo"; lock_bb=0})))
+                                       func.lock_unlocks) in
+                   let possible_queries = cross_prod lock_places unlock_places in
+                   (*let queries = List.filter (fun (a,b) -> match a,b with
+                                                           |(_,Lock l),(_,Unlock u) -> l.lock_name = u.lock_name
+                                                           |_ -> false) possible_queries in *)
+                   trace_queries rs ((func, possible_queries)::aux) in
+  let (_,intfuns) = List.split (Hashtbl.to_list (get_interesting_funs file_funs)) in
+  let queries_list = trace_queries intfuns [] in
+  queries_list
+(********************* End: Initial lock/unlock traces queries *********************)
+
+(********************* Trace inlining *********************)
+
+  
+
+
+
+(********************* End: Trace inlining *********************)
+  
+(********************* Lock/unlock query processing *********************)
+  (*** For each query, for each pair of lock and unlock operation:
+       1. Calculate the sub-CFG.
+       2. If the sub-CFG is not empty, then calculate all the traces.
+       3. For each trace, check there are no other locks and unlocks.
+       4. For each trace, request the inline information.
+       5. For each trace get the effects string representation.
+   ***)
+let lock_unlock_qry_proc queries_list =
+  let rec process_function_queries (fun_info, ql) aux = match ql with
+    |((l,Lock _), (u,Unlock _))::rs ->
+      let subg = sub_cfg fun_info.cfg l u in
+      if subg = [] then process_function_queries (fun_info, rs) aux
+      else
+        (
+          let traces = execution_traces subg l in
+          let st = string_of_traces [traces] fun_info.eba_fun fun_info.stmts in
+          process_function_queries (fun_info, rs) (st::aux)
+        )
+    |[] -> aux
+    |_ -> aux in
+  (*List.map process_function_queries queries_list*)
+  let rec l_u_aux ql aux = match ql with
+    |q::rs -> l_u_aux rs ((process_function_queries q [])::aux)
+    |[] -> aux
+  in
+  List.filter (fun x -> not (List.is_empty x)) (l_u_aux queries_list [])
+  
+
+
+
+(********************* Lock/unlock query processing *********************)  
+  
+(**************************************** Query pre-processing ****************************************)
+(* Pre-process all the functions for queries *)
+let pre_process cil_file eba_file =
+  process_functions cil_file eba_file
+
+(************************************* End: Query pre-processing **************************************)  
+
+
+(**************************************** Query entry point ****************************************
+ Performs the full query of lock and release it is meant to be called from infer_file or so        *)
+let lock_release_query cil_file gcc_filename eba_file =
+  let pre_proc = pre_process cil_file eba_file in
+  let uq = lock_unlock_queries pre_proc in
+  let res = lock_unlock_qry_proc uq in
+  let rec print_list str_list = match str_list with
+    |s::rs -> Printf.printf "%s\n" s; print_list rs
+    |[] -> ()
+  in
+  List.iter print_list res
+  
+
+(**************************************** End: Query entry point ****************************************)  
 let infer_file checks fn =
 	let file = Frontc.parse fn () in
 	let fileAbs = Infer.of_file file in
@@ -408,7 +558,9 @@ let infer_file checks fn =
 	then begin
 		let fn_abs = fn ^ ".abs" in
 		File.with_file_out fn_abs (fun out -> AFile.fprint out fileAbs);
-                dump_cfg file fn fileAbs
+                (*dump_cfg file fn fileAbs*)
+                lock_release_query file fn fileAbs;
+                ()
 	end;
 	run_checks checks file fileAbs;
 	if Opts.Get.gc_stats()

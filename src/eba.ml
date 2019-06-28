@@ -2,6 +2,7 @@
 open Batteries
 open Cmdliner
 
+   
 open Abs
 
 module L = LazyList
@@ -138,22 +139,44 @@ let create_cfg (fd:Cil.fundec) eba_fd =
 
 (******************************** End: CFG Creation *******************************)
 
-(******************************** Dictionary toos *********************************)
+(******************************** Dictionary tools *********************************)
 
+(**** Returns all the statements for a given basic block index ****)
 let statements_at_index stmts index =
   try List.find (fun (i,a) -> if i = index then true else false) stmts
   with Not_found -> raise Not_found
-    
 
-(******************************** Dictionary toos *********************************)
+(**** Returns all the statements inside a given trace *****)
+let rec statements_for_trace trace (statements:(int * Cil.stmt list) list) =
+  List.concat (List.map (fun bb_id -> let (_,stmts) = statements_at_index statements bb_id in stmts) trace)                 
 
+(******************************** Dictionary tools *********************************)
+
+(******************************** List tools *********************************)
+
+(* Inits a list with len copies of elem *)
+let rec init_list len elem aux = match len with
+  | 0 -> aux
+  | n -> init_list (n-1) elem (elem::aux)
+
+(* Clones a list having 'n' copies of each element, preserving the order, i.e.
+ if the element 'a' is first in the list, the copies of 'a' will be first in
+the result*)
+let rec clone_list n list aux = match list with
+  | hd::rs -> clone_list n rs (List.append (init_list n hd []) aux)
+  | [] -> aux
+
+  
+(******************************** List tools *********************************)
+  
   
 let rec nodes_dot_code (rootn : eba_cfg_node list) =
   match rootn with
   |hd::xs -> (List.fold_left (fun prev n -> prev ^ "{\"source\": " ^ string_of_int (List.hd hd.id) ^ ", \"target\": " ^
                                               (string_of_int n) ^ "},\n") "" hd.succ) ^ (nodes_dot_code xs)
   |[] -> "{\"source\":-1, \"target\":-1}\n"
-
+  
+  
 
 (* String of statements, returns a string for every statemet in the stmts list *)
 let rec string_of_stmts stmts eba_fun =
@@ -177,7 +200,7 @@ let rec string_of_stmts stmts eba_fun =
   let string_of_inst (inst:Cil.instr) = match inst with
     | Set (l,e,loc) -> (*"Set: " ^ string_of_set l ^*) "SET " ^ string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
     | Call (l, e, args,loc) -> (*"Call: " ^ string_of_exp e ^*) "CALL " ^ string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr eba_fun loc )
-    | Asm _ -> (*"ASM"*) "" in
+    | Asm _ -> (*"ASM"*) "ASM" in
 (* String of an statement, returns a string representation of stmt based on its type *)
   let string_of_stmt (stmt:Cil.stmt) = match stmt.skind with
     | If (e, _, _, l)  -> (*"if " ^ string_of_exp e*) (*"if" ^*) Type.Effects.to_string (AFun.effect_of_expr eba_fun l)
@@ -292,15 +315,27 @@ let execution_traces cfg source =
                                  explore xs graph exec_traces
                              )
                           )
-                   |hd::ts -> node.succ <- ts;
-                              explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                   |hd::[] ->(
+                   (*If we have a back edge we do not remove it *)
+                       let back_edge = List.find_opt (fun x -> List.hd x.t_id = hd) stack in
+                       match back_edge with
+                       |None -> node.succ <- [];
+                                explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                       |_ ->( (* Create a dummy node with no sucessors so it stops in the next iteration *)
+                         let new_stack = ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) in
+                         explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) new_stack))::exec_traces)
+                       )
+                   )
+                   |hd::ts -> 
+                       node.succ <- ts;
+                       explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
                    ) in
   explore [List.find (fun n -> List.hd n.t_id = source) exec_ready] exec_ready []
 (******** End: Returns all the execution traces within cfg rooted at a given node (source) ********)
 
 
-(******** Returns a string of all the effects of all the given traces ********)
-let string_of_traces traces ebaFun stmts =
+(******** Returns a string of all the effects of all the given traces in basic block form (int list) ********)
+let string_of_int_traces traces ebaFun stmts =
   let output_effects trace =
     (*Outputs the effects of all the instructions in all blocks of the trace *)
     let bb_string (bb_num:int) =
@@ -372,9 +407,9 @@ let rec lock_unlock_calls stmts =
     (*| Block b -> List.concat (List.map (find_lock_unlock (bb_ind+20)) b.bstmts)*)
     |_ -> [] in
   let rec basic_block_stmts block_stmts = match block_stmts with
-    |(i,stmts):: xs -> (i,List.concat ( List.map (find_lock_unlock i) stmts)) :: basic_block_stmts xs
+    |(i,stmts):: xs -> List.concat ( List.map (find_lock_unlock i) stmts) :: basic_block_stmts xs
     | [] -> [] in
-  List.filter (fun (_,l) -> (List.length l) <> 0) (basic_block_stmts stmts)
+  List.filter (fun l -> not (List.is_empty l)) (basic_block_stmts stmts)
 
 (******************** End: Lock/Unlock filter  ********************)
   
@@ -385,7 +420,9 @@ type function_query_info =
     cfg : eba_cfg_node list;
     stmts : (int * Cil.stmt list) list;
     eba_fun : Abs.AFun.t;
-    mutable lock_unlocks : (int * locking_call list) list ;
+    mutable lock_unlocks : locking_call list list ;
+    mutable full_traces : int list list;
+    mutable stmts_per_trace : (Cil.stmt list) list;
   }
 
 (****************************************************************
@@ -406,12 +443,114 @@ let process_functions cil_file eba_file =
           (*Find eba's function abstraction*)
           match f with
           |Some(_,ebaFun) -> Hashtbl.add function_table fd.svar.vname
-                               {name=fd.svar.vname;cfg=cfg_root;stmts=stmts_list;eba_fun=ebaFun;lock_unlocks=[];}
+                               {name=fd.svar.vname;cfg=cfg_root;stmts=stmts_list;eba_fun=ebaFun;
+                                lock_unlocks=[];full_traces = []; stmts_per_trace = []}
           |None -> raise Not_found (*Should never happen*)
          )
       | _ -> ()
     );
   function_table
+
+type query_lastFun =
+  {
+    mutable last_match: Abs.AFun.t;
+  }
+(** Outputs the effect and shape of the stmt, eba_fun is the latest funtion that was queried 
+ It returns the string representation and the function definition that matched **)
+let string_of_stmt (stmt:Cil.stmt) last_fun funs_dir =
+
+
+  let sofie loc is_instr =
+    let list_of_funs = List.map (fun (x,y) -> y) (Hashtbl.to_list funs_dir) in
+    let rec sofie_aux (funs:function_query_info list) = match funs with
+      |hd::rs -> if is_instr then
+                   ( try
+                       let _ = AFun.effect_of_instr hd.eba_fun loc in
+                       last_fun.last_match <- hd.eba_fun;
+                       hd.eba_fun
+                     with Not_found -> sofie_aux rs
+                   )else
+                   ( 
+                       try
+                         let _ = AFun.effect_of_expr hd.eba_fun loc in
+                         last_fun.last_match <- hd.eba_fun;
+                         hd.eba_fun               
+                       with Not_found -> sofie_aux rs
+                   )
+      |[] -> raise (Not_found) in
+    (* Try the last seen function *)
+    try
+      if is_instr then
+        let _ = AFun.effect_of_instr last_fun.last_match loc in
+        last_fun.last_match
+      else
+        let _ = AFun.effect_of_expr last_fun.last_match loc in
+        last_fun.last_match
+    with Not_found -> sofie_aux list_of_funs in
+
+  
+  let string_of_inst (inst:Cil.instr) = match inst with
+    | Set (l,e,loc) ->
+       (
+         let holding_fun = sofie loc true in
+         string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr holding_fun loc )
+       )
+    | Call (l, e, args,loc) ->
+       (
+         let holding_fun = sofie loc true in
+         string_of_int loc.byte ^ Type.Effects.to_string (AFun.effect_of_instr holding_fun loc )
+       )
+    | Asm _ -> "" in
+                                  
+  match stmt.skind with
+  |Instr [] -> ""
+  |Instr i -> List.fold_left (^) "" (List.map (fun i -> "\t"^ string_of_inst i ^ "\n") i )
+  |If (e, _, _, l)  ->
+    (
+      let holding_fun = sofie l false in
+      Type.Effects.to_string (AFun.effect_of_expr holding_fun l)
+    )
+  |_ -> ""
+
+
+(******** Returns a string of all the effects of all the given traces in statement form (Cil.stmt list) ********)
+let string_of_traces traces ebaFun fun_dir fun_name =
+  (*List.fold_left (^) "" (List.map (fun trace -> let t_str = string_of_int (List.length trace) in
+                         t_str ^ "============\n\n\n") traces)*)
+  let lm = {last_match = ebaFun} in
+  let filename = fun_name ^ ".txt" in
+  let chan = open_out_gen [Open_wronly; Open_append; Open_creat; Open_text] 0o666 filename in
+  let trace_2_str trace =
+    List.fold_left (^) "" (List.map (fun x -> let s = string_of_stmt x lm fun_dir in
+                                              if s = "" then s else s ^ "\n") trace) in
+  List.iter (fun trace -> Printf.fprintf chan "%s\n===========\n" (trace_2_str trace)) traces;
+  close_out chan
+  
+  (*List.fold_left (^) "" (List.map (fun trace -> let t_str =
+                           List.fold_left (^) "" (List.map (fun x -> let s = string_of_stmt x lm fun_dir in
+                                                                     if s = "" then s else s ^ "\n") trace) in
+                         t_str ^ "============\n\n\n") traces)*)
+
+(******** End: Returns a string of all the effects of all the given traces ********)  
+      
+(**************************************** Functions traces and effects dump ****************************************)
+let traces_effects_for_fun fun_name fun_dir =
+  let fun_desc = Hashtbl.find fun_dir fun_name in
+  if not (List.is_empty fun_desc.cfg) && List.is_empty fun_desc.full_traces then
+    (
+      fun_desc.full_traces <- execution_traces fun_desc.cfg 0;
+      fun_desc.stmts_per_trace <- List.map (fun trace -> statements_for_trace trace fun_desc.stmts)
+                                       fun_desc.full_traces;
+    ) else ();
+  fun_desc.stmts_per_trace
+
+
+
+
+(**************************************** End: Functions traces and effects dump ****************************************)  
+
+
+  
 
 (****************************************************************
 Returns all the effects for a given trace.
@@ -459,10 +598,6 @@ let lock_unlock_queries file_funs =
     |_ :: rs, _ -> lock_unlock_finder rs op
     |[],_ -> [] in
 
-  let rec make_pairs ind l = match l with
-    |xs::rs -> (ind,xs)::make_pairs ind rs
-    |[] -> [] in
-
   let rec cross_prod l1 l2 = match l1 with
     | xs::[] -> List.map (fun x -> (xs,x)) l2
     | xs::rs -> List.append (List.map (fun x -> (xs,x)) l2) (cross_prod rs l2)
@@ -472,11 +607,11 @@ let lock_unlock_queries file_funs =
   let rec trace_queries (inter_funs:function_query_info list) aux =
     match inter_funs with
     |[] -> aux
-    |func :: rs -> let lock_places = List.concat (List.map (fun (i,a) ->
-                                         make_pairs i (lock_unlock_finder a (Lock {lock_name="foo"; lock_bb=0})))
+    |func :: rs -> let lock_places = List.concat (List.map (fun a ->
+                                         lock_unlock_finder a (Lock {lock_name="foo"; lock_bb=0}))
                                        func.lock_unlocks) in
-                   let unlock_places = List.concat (List.map (fun (i,a) ->
-                                         make_pairs i (lock_unlock_finder a (Unlock {lock_name="foo"; lock_bb=0})))
+                   let unlock_places = List.concat (List.map (fun a ->
+                                         lock_unlock_finder a (Unlock {lock_name="foo"; lock_bb=0}))
                                        func.lock_unlocks) in
                    let possible_queries = cross_prod lock_places unlock_places in
                    (*let queries = List.filter (fun (a,b) -> match a,b with
@@ -488,13 +623,93 @@ let lock_unlock_queries file_funs =
   queries_list
 (********************* End: Initial lock/unlock traces queries *********************)
 
-(********************* Trace inlining *********************)
 
-  
+(* Scan the trace's statements and per each call, it inlines the code *)  
+let rec scan_and_inline (trace:Cil.stmt list) funs_dir aux = 
+  (* Append a list of statments to the aux traces *)
+  let append_stmts stmts aux = List.map (fun s ->  List.append s stmts) aux in
+    
+  let is_function_call (inst:Cil.instr) =
+    match inst with
+    |Call(_,Lval (Var a,_),_,loc) -> a.vname
+    |_ -> "" in
+  let rec remove_calls stmts calls_list =
+    match calls_list with
+    |c :: rs -> let (_,remaining) = List.partition
+                                      (fun inst -> if is_function_call inst = c then true else false)
+                                      stmts in
+                remove_calls remaining rs
+    |[] -> stmts in
+
+  let calls_in_stmt (stmt:Cil.stmt) remove calls_list = match stmt.skind with
+    | Instr i -> if not remove then
+                   List.filter (fun name -> name <> "") (List.map is_function_call i)
+                 else(
+                   stmt.skind <- Instr (remove_calls i calls_list);
+                   []
+                 )
+    | _ -> [] in
+  let inline_call_stmts fun_name  =
+    try let fun_desc = Hashtbl.find funs_dir fun_name in
+        if not (List.is_empty fun_desc.cfg) && List.is_empty fun_desc.full_traces then
+          (
+            (* Calculate the traces and the statements per trace *)
+            fun_desc.full_traces <- execution_traces fun_desc.cfg 0;
+            fun_desc.stmts_per_trace <- List.map
+                                         (fun trace -> statements_for_trace trace fun_desc.stmts)
+                                         fun_desc.full_traces
+          );
+        fun_desc.stmts_per_trace
+    with Not_found -> [] in
+
+  let rec process_inline calls curnt_aux =
+    let rec cross_traces t aux = match t with
+      |a::rs -> let aux_new = List.concat (List.map (fun x -> List.map (fun y -> List.append x y) a) aux) in
+                cross_traces rs aux_new
+      |[] -> aux in
+
+    let inline_traces = List.filter (fun x -> not (List.is_empty x)) (List.map (inline_call_stmts) calls) in
+    (* Cross all inline traces to what we have processed so far *)
+    cross_traces inline_traces curnt_aux in
+ 
+
+  match trace with
+  |hd::rs ->
+    (
+      let calls = calls_in_stmt hd false [] in
+      if List.is_empty calls then
+        let new_aux = append_stmts [hd] aux in
+        scan_and_inline rs funs_dir new_aux
+      else(
+        (* We have calls so we inline them *)
+        (* First find which functions are 'inlinable', i.e. are NOT defined in the file 
+           and remove them from the statemt list so we do not inline them again *)
+        let (to_remove, _) = List.split (List.filter (fun (_,l) -> l)
+                                           (List.combine calls (List.map
+                                                                  (fun x -> if List.is_empty (inline_call_stmts x)
+                                                                            then true else false) calls))) in
+        let _ = calls_in_stmt hd true to_remove in (*side effect *)
+        let new_aux = process_inline calls (append_stmts [hd] aux) in
+        scan_and_inline rs funs_dir new_aux
+      )
+    )
+  |[] -> List.rev aux 
 
 
-
-(********************* End: Trace inlining *********************)
+(************** Top call for the inlining processing **************
+traces: The traces to be inlined
+depth_level: The depth of the inline
+funs_dir: The directory of functions in the file
+ *******************************************************************)
+       
+let rec inline_traces traces depth_level funs_dir =
+  match depth_level with
+  |0 -> traces
+  |n -> if n < 0 then traces else
+          (
+            let inlined = List.concat (List.map (fun x -> scan_and_inline x funs_dir [[]]) traces) in
+            inline_traces inlined (n-1) funs_dir
+          )
   
 (********************* Lock/unlock query processing *********************)
   (*** For each query, for each pair of lock and unlock operation:
@@ -504,25 +719,37 @@ let lock_unlock_queries file_funs =
        4. For each trace, request the inline information.
        5. For each trace get the effects string representation.
    ***)
-let lock_unlock_qry_proc queries_list =
-  let rec process_function_queries (fun_info, ql) aux = match ql with
-    |((l,Lock _), (u,Unlock _))::rs ->
-      let subg = sub_cfg fun_info.cfg l u in
-      if subg = [] then process_function_queries (fun_info, rs) aux
+let lock_unlock_qry_proc queries_list funs_dir inline_depth =
+                    
+  let rec process_function_queries (fun_info, ql) last_fun = match ql with
+    |(Lock l,Unlock u)::rs ->
+      let subg = sub_cfg fun_info.cfg l.lock_bb u.lock_bb in
+      if subg = [] then process_function_queries (fun_info, rs) last_fun
       else
         (
-          let traces = execution_traces subg l in
-          let st = string_of_traces [traces] fun_info.eba_fun fun_info.stmts in
-          process_function_queries (fun_info, rs) (st::aux)
+          let traces = execution_traces subg l.lock_bb in
+          let stmts_per_trace = List.map (fun x -> statements_for_trace x fun_info.stmts) traces in
+          let inlined_traces = inline_traces stmts_per_trace inline_depth funs_dir in
+          (*let st ="Total number for traces: "^ string_of_int (List.length inlined_traces) ^"\n" ^
+          "Total number of stmts: "^ string_of_int (List.fold_left (+) 0 (List.map (List.length) inlined_traces)) in*)
+          
+          string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
+          
+          process_function_queries (fun_info, rs) last_fun
         )
-    |[] -> aux
-    |_ -> aux in
+    |[] -> ()
+    |_ -> () in
   (*List.map process_function_queries queries_list*)
-  let rec l_u_aux ql aux = match ql with
-    |q::rs -> l_u_aux rs ((process_function_queries q [])::aux)
-    |[] -> aux
+  let rec l_u_aux ql = match ql with
+    |q::rs ->(
+      let (fi,_) = q in
+      let lst_fun = {last_match = fi.eba_fun} in
+      process_function_queries q lst_fun;
+      l_u_aux rs
+    )
+    |[] -> ()
   in
-  List.filter (fun x -> not (List.is_empty x)) (l_u_aux queries_list [])
+  l_u_aux queries_list
   
 
 
@@ -542,12 +769,12 @@ let pre_process cil_file eba_file =
 let lock_release_query cil_file gcc_filename eba_file =
   let pre_proc = pre_process cil_file eba_file in
   let uq = lock_unlock_queries pre_proc in
-  let res = lock_unlock_qry_proc uq in
-  let rec print_list str_list = match str_list with
+  lock_unlock_qry_proc uq pre_proc 2
+  (*let rec print_list str_list = match str_list with
     |s::rs -> Printf.printf "%s\n" s; print_list rs
     |[] -> ()
   in
-  List.iter print_list res
+  List.iter print_list res*)
   
 
 (**************************************** End: Query entry point ****************************************)  

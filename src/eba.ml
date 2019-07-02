@@ -334,6 +334,51 @@ let execution_traces cfg source =
 (******** End: Returns all the execution traces within cfg rooted at a given node (source) ********)
 
 
+(******** Return all the execution traces between source and target ********)
+let bounded_execution_traces cfg source target =
+  let exec_ready = List.map (fun node -> {t_id = node.id; predc = node.predc; succ = node.succ}) cfg in
+  let rec explore stack graph exec_traces =
+    match stack with
+    |[] -> exec_traces
+    |node :: xs -> if List.hd node.t_id = target then explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces) else (match node.succ with
+                     (*Either we are at a leaf so we report the stack or we are in a branching node
+                       and continue up *)
+                   |[] -> (let curnt_node qnode = List.find (fun i -> List.hd i.id = List.hd qnode.t_id) cfg in
+                           if List.length (curnt_node node).succ > 1 then explore xs graph exec_traces else
+                             if List.length (curnt_node node).succ = 0 then
+                               explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
+                             else (
+                               let suc = List.hd (curnt_node node).succ in
+                               if List.exists (fun s -> if List.hd s.t_id = suc then true else false) stack then
+                                 explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
+                               else
+                                 explore xs graph exec_traces
+                             )
+                          )
+                   |hd::[] ->(
+                   (*If we have a back edge we do not remove it *)
+                       let back_edge = List.find_opt (fun x -> List.hd x.t_id = hd) stack in
+                       match back_edge with
+                       |None -> node.succ <- [];
+                                explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                       |_ ->( (* Create a dummy node with no sucessors so it stops in the next iteration *)
+                         let new_stack = ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) in
+                         explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) new_stack))::exec_traces)
+                       )
+                   )
+                   |hd::ts -> 
+                       node.succ <- ts;
+                       explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                   ) in
+  explore [List.find (fun n -> List.hd n.t_id = source) exec_ready] exec_ready []
+
+(******** End:Return all the execution traces between source and target ********)  
+
+
+
+  
+  
+
 (******** Returns a string of all the effects of all the given traces in basic block form (int list) ********)
 let string_of_int_traces traces ebaFun stmts =
   let output_effects trace =
@@ -370,12 +415,14 @@ type locking_call =
   | Unlock of unlock_call
   | None
   
-let rec lock_unlock_calls stmts =
+let rec lock_unlock_calls stmts eba_fun =
 
   let get_lock_name (args:Cil.exp list) =
     match args with
-    | Lval (Var name,_)::[] -> name.vname
-    | _ -> "unknown"
+    | Lval (Var name,_)::_ -> name.vname
+    | AddrOf _::[] -> "AddrOf"
+    | AddrOfLabel _::[]-> "AddrOfLevel"
+    | _ -> "unkown"
   in
   
   
@@ -573,7 +620,7 @@ let get_interesting_funs funs_dir =
   Hashtbl.filter_map_inplace (fun fname (data:function_query_info) ->
       if List.length data.cfg < 3 then None
       else
-        let lu = lock_unlock_calls data.stmts in
+        let lu = lock_unlock_calls data.stmts data.eba_fun in
         if List.length lu <> 0 then
           (
           (*It is an interesting function*)
@@ -710,7 +757,19 @@ let rec inline_traces traces depth_level funs_dir =
             let inlined = List.concat (List.map (fun x -> scan_and_inline x funs_dir [[]]) traces) in
             inline_traces inlined (n-1) funs_dir
           )
-  
+
+
+(** Prototype for checking if a trace is clean or suspicious, interleaved locks and unlocks *)
+      
+let rec is_clean_trace list_of_lock_ops trace =
+
+  let rec check_trace (l,u) tr = match tr with
+    |[] -> true
+    |x::xs -> if x = l || x = u then false else check_trace (l,u) xs in
+
+    match list_of_lock_ops with
+    |[] -> true
+    |x::rs -> if not (check_trace x trace) then false else is_clean_trace rs trace
 (********************* Lock/unlock query processing *********************)
   (*** For each query, for each pair of lock and unlock operation:
        1. Calculate the sub-CFG.
@@ -721,28 +780,43 @@ let rec inline_traces traces depth_level funs_dir =
    ***)
 let lock_unlock_qry_proc queries_list funs_dir inline_depth =
                     
-  let rec process_function_queries (fun_info, ql) last_fun = match ql with
-    |(Lock l,Unlock u)::rs ->
-      let subg = sub_cfg fun_info.cfg l.lock_bb u.lock_bb in
-      if subg = [] then process_function_queries (fun_info, rs) last_fun
-      else
-        (
-          let traces = execution_traces subg l.lock_bb in
-          let stmts_per_trace = List.map (fun x -> statements_for_trace x fun_info.stmts) traces in
-          let inlined_traces = inline_traces stmts_per_trace inline_depth funs_dir in
+  let rec process_function_queries (fun_info, query_list) last_fun =
+
+    let bbs_of_queries = List.map (fun l -> match l with | (Lock x, Unlock y) -> (x.lock_bb,y.lock_bb)|_ -> (-1,-1)) query_list in
+    
+    let rec process_function_queries_aux ql = 
+      match ql with
+      |(Lock l,Unlock u)::rs ->
+        let subg = sub_cfg fun_info.cfg l.lock_bb u.lock_bb in
+        if subg = [] then process_function_queries_aux rs
+        else
+          (
+            let traces = bounded_execution_traces subg l.lock_bb u.lock_bb in
+            let other_locks = List.filter (fun (x,y) -> x <> l.lock_bb || y <> u.lock_bb) bbs_of_queries in
+            let trimmed_traces = List.map (fun tr -> if List.length tr <= 2 then [] else List.tl(List.rev(List.tl tr))) traces in
+            let clean_traces = List.map (is_clean_trace other_locks) trimmed_traces  in
+            let to_check = List.combine clean_traces traces in
+            List.iter (fun (valid,trace) -> match valid with
+                                            | true -> (
+                                              let stmts_per_trace = statements_for_trace trace fun_info.stmts in
+                                              let inlined_traces = inline_traces [stmts_per_trace] inline_depth funs_dir in
           (*let st ="Total number for traces: "^ string_of_int (List.length inlined_traces) ^"\n" ^
           "Total number of stmts: "^ string_of_int (List.fold_left (+) 0 (List.map (List.length) inlined_traces)) in*)
-          
-          string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
-          
-          process_function_queries (fun_info, rs) last_fun
-        )
-    |[] -> ()
-    |_ -> () in
+                                              string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
+                                            );
+                                            | _ -> () ) to_check;
+
+            process_function_queries_aux rs
+          )
+      |[] -> ()
+      |_ -> () in
+    process_function_queries_aux query_list in
   (*List.map process_function_queries queries_list*)
   let rec l_u_aux ql = match ql with
     |q::rs ->(
       let (fi,_) = q in
+      let (_,ql) = q in
+      
       let lst_fun = {last_match = fi.eba_fun} in
       process_function_queries q lst_fun;
       l_u_aux rs
@@ -751,7 +825,31 @@ let lock_unlock_qry_proc queries_list funs_dir inline_depth =
   in
   l_u_aux queries_list
   
+let full_function_trace funs_dir inline_depth =
+  let rec process_function fun_info last_fun =
+    let subg = fun_info.cfg in
+    if subg = [] then ()
+    else
+      (
+        let traces = execution_traces subg 0 in
+        let stmts_per_trace = List.map (fun x -> statements_for_trace x fun_info.stmts) traces in
+        let inlined_traces = inline_traces stmts_per_trace inline_depth funs_dir in
+          (*let st ="Total number for traces: "^ string_of_int (List.length inlined_traces) ^"\n" ^
+          "Total number of stmts: "^ string_of_int (List.fold_left (+) 0 (List.map (List.length) inlined_traces)) in*)
 
+        string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
+      ) in
+  (*List.map process_function_queries queries_list*)
+  let rec l_u_aux ql = match ql with
+    |q::rs ->(
+      let (_,fi) = q in
+      let lst_fun = {last_match = fi.eba_fun} in
+      process_function fi lst_fun;
+      l_u_aux rs
+    )
+    |[] -> ()
+  in
+  l_u_aux (Hashtbl.to_list funs_dir)
 
 
 (********************* Lock/unlock query processing *********************)  
@@ -769,7 +867,8 @@ let pre_process cil_file eba_file =
 let lock_release_query cil_file gcc_filename eba_file =
   let pre_proc = pre_process cil_file eba_file in
   let uq = lock_unlock_queries pre_proc in
-  lock_unlock_qry_proc uq pre_proc 2
+  lock_unlock_qry_proc uq pre_proc 1
+  (*full_function_trace pre_proc 3*)
   (*let rec print_list str_list = match str_list with
     |s::rs -> Printf.printf "%s\n" s; print_list rs
     |[] -> ()

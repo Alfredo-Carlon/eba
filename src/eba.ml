@@ -300,77 +300,56 @@ let execution_traces cfg source =
   let rec explore stack graph exec_traces =
     match stack with
     |[] -> exec_traces
-    |node :: xs -> (match node.succ with
-                     (*Either we are at a leaf so we report the stack or we are in a branching node
+    |node :: xs -> (
+      match node.succ with
+                     (*Either we are at a leaf, so we report the stack or we are in a branching/goto target node
                        and continue up *)
-                   |[] -> (let curnt_node qnode = List.find (fun i -> List.hd i.id = List.hd qnode.t_id) cfg in
-                           if List.length (curnt_node node).succ > 1 then explore xs graph exec_traces else
-                             if List.length (curnt_node node).succ = 0 then
-                               explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
-                             else (
-                               let suc = List.hd (curnt_node node).succ in
-                               if List.exists (fun s -> if List.hd s.t_id = suc then true else false) stack then
-                                 explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
-                               else
-                                 explore xs graph exec_traces
-                             )
-                          )
-                   |hd::[] ->(
-                   (*If we have a back edge we do not remove it *)
-                       let back_edge = List.find_opt (fun x -> List.hd x.t_id = hd) stack in
-                       match back_edge with
-                       |None -> node.succ <- [];
-                                explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
-                       |_ ->( (* Create a dummy node with no sucessors so it stops in the next iteration *)
-                         let new_stack = ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) in
-                         explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) new_stack))::exec_traces)
-                       )
-                   )
-                   |hd::ts -> 
-                       node.succ <- ts;
-                       explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
-                   ) in
+      |[] -> (
+        let curnt_node = List.find (fun i -> List.hd i.id = List.hd node.t_id) cfg in
+        if List.length curnt_node.succ <> 0
+        then
+          (node.succ <- curnt_node.succ; explore xs graph exec_traces)
+        else
+          explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
+      )
+      |hd::ts -> 
+        (*Check if hd is a back edge *)
+        let back_edge = List.find_opt (fun x -> List.hd x.t_id = hd) stack in
+        match back_edge with
+        |None -> node.succ <- ts;
+                 explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
+                                  
+        |_ ->( (* Create a dummy node with no sucessors so it stops in the next iteration *)
+          let new_stack = ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) in
+          node.succ <- ts;
+          explore stack graph ((List.rev (List.map (fun p -> List.hd p.t_id) new_stack))::exec_traces)
+        )
+
+        (*node.succ <- ts;
+        explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces*)
+    ) in
   explore [List.find (fun n -> List.hd n.t_id = source) exec_ready] exec_ready []
 (******** End: Returns all the execution traces within cfg rooted at a given node (source) ********)
 
 
 (******** Return all the execution traces between source and target ********)
 let bounded_execution_traces cfg source target =
-  let exec_ready = List.map (fun node -> {t_id = node.id; predc = node.predc; succ = node.succ}) cfg in
-  let rec explore stack graph exec_traces =
-    match stack with
-    |[] -> exec_traces
-    |node :: xs -> if List.hd node.t_id = target then explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces) else (match node.succ with
-                     (*Either we are at a leaf so we report the stack or we are in a branching node
-                       and continue up *)
-                   |[] -> (let curnt_node qnode = List.find (fun i -> List.hd i.id = List.hd qnode.t_id) cfg in
-                           if List.length (curnt_node node).succ > 1 then explore xs graph exec_traces else
-                             if List.length (curnt_node node).succ = 0 then
-                               explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
-                             else (
-                               let suc = List.hd (curnt_node node).succ in
-                               if List.exists (fun s -> if List.hd s.t_id = suc then true else false) stack then
-                                 explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) stack))::exec_traces)
-                               else
-                                 explore xs graph exec_traces
-                             )
-                          )
-                   |hd::[] ->(
-                   (*If we have a back edge we do not remove it *)
-                       let back_edge = List.find_opt (fun x -> List.hd x.t_id = hd) stack in
-                       match back_edge with
-                       |None -> node.succ <- [];
-                                explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
-                       |_ ->( (* Create a dummy node with no sucessors so it stops in the next iteration *)
-                         let new_stack = ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) in
-                         explore xs graph ((List.rev (List.map (fun p -> List.hd p.t_id) new_stack))::exec_traces)
-                       )
-                   )
-                   |hd::ts -> 
-                       node.succ <- ts;
-                       explore ((List.find (fun n -> List.hd n.t_id = hd) exec_ready)::stack) graph exec_traces
-                   ) in
-  explore [List.find (fun n -> List.hd n.t_id = source) exec_ready] exec_ready []
+  let traces = execution_traces cfg source in
+  (*Filter the traces to keep only the ones that do end at target *)
+  let ht = Hashtbl.create (List.length traces) in
+  let rec trim_trace aux tr = match tr with
+    |hd::xs -> if hd = target then List.rev (hd::aux) else trim_trace (hd::aux) xs
+    |[] -> [] in
+  let trs = List.filter
+              (fun x -> if List.is_empty x then false else true)
+              (List.map (trim_trace []) traces) in
+  List.iter (fun t ->
+      let found = Hashtbl.find_option ht t in
+      match found with
+      |None -> Hashtbl.add ht t true
+      |_ -> ()) trs;
+  let (a,_) = List.split (Hashtbl.to_list ht) in
+  a
 
 (******** End:Return all the execution traces between source and target ********)  
 
@@ -734,7 +713,7 @@ let rec scan_and_inline (trace:Cil.stmt list) funs_dir aux =
         let (to_remove, _) = List.split (List.filter (fun (_,l) -> l)
                                            (List.combine calls (List.map
                                                                   (fun x -> if List.is_empty (inline_call_stmts x)
-                                                                            then true else false) calls))) in
+                                                                            then false else true) calls))) in
         let _ = calls_in_stmt hd true to_remove in (*side effect *)
         let new_aux = process_inline calls (append_stmts [hd] aux) in
         scan_and_inline rs funs_dir new_aux
@@ -767,9 +746,9 @@ let rec is_clean_trace list_of_lock_ops trace =
     |[] -> true
     |x::xs -> if x = l || x = u then false else check_trace (l,u) xs in
 
-    match list_of_lock_ops with
-    |[] -> true
-    |x::rs -> if not (check_trace x trace) then false else is_clean_trace rs trace
+  match list_of_lock_ops with
+  |[] -> true
+  |x::rs -> if not (check_trace x trace) then false else is_clean_trace rs trace
 (********************* Lock/unlock query processing *********************)
   (*** For each query, for each pair of lock and unlock operation:
        1. Calculate the sub-CFG.
@@ -865,10 +844,11 @@ let pre_process cil_file eba_file =
 (**************************************** Query entry point ****************************************
  Performs the full query of lock and release it is meant to be called from infer_file or so        *)
 let lock_release_query cil_file gcc_filename eba_file =
-  let pre_proc = pre_process cil_file eba_file in
+  (*let pre_proc = pre_process cil_file eba_file in
   let uq = lock_unlock_queries pre_proc in
-  lock_unlock_qry_proc uq pre_proc 1
-  (*full_function_trace pre_proc 3*)
+  lock_unlock_qry_proc uq pre_proc 1*)
+  let pre_proc = get_interesting_funs (pre_process cil_file eba_file) in
+  full_function_trace pre_proc 2
   (*let rec print_list str_list = match str_list with
     |s::rs -> Printf.printf "%s\n" s; print_list rs
     |[] -> ()
@@ -885,10 +865,10 @@ let infer_file checks fn =
 		let fn_abs = fn ^ ".abs" in
 		File.with_file_out fn_abs (fun out -> AFile.fprint out fileAbs);
                 (*dump_cfg file fn fileAbs*)
-                lock_release_query file fn fileAbs;
                 ()
 	end;
 	run_checks checks file fileAbs;
+        lock_release_query file fn fileAbs;
 	if Opts.Get.gc_stats()
 	then begin
 		Printf.fprintf stderr "======= GC stats =======\n";

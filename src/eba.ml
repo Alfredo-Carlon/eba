@@ -844,11 +844,26 @@ let pre_process cil_file eba_file =
 (**************************************** Query entry point ****************************************
  Performs the full query of lock and release it is meant to be called from infer_file or so        *)
 let lock_release_query cil_file gcc_filename eba_file =
+
+  (********* Critical region traces generator ************)
   (*let pre_proc = pre_process cil_file eba_file in
   let uq = lock_unlock_queries pre_proc in
   lock_unlock_qry_proc uq pre_proc 1*)
-  let pre_proc = get_interesting_funs (pre_process cil_file eba_file) in
-  full_function_trace pre_proc 2
+  (********* End: Critical region traces generator ************)
+  
+  (********* Full traces of functions with locking operations ************)
+  (*let pre_proc = get_interesting_funs (pre_process cil_file eba_file) in
+  full_function_trace pre_proc 2*)
+  (********* End: Full traces of functions with locking operations ************)
+
+  (********* Full traces of all functions ************)
+
+  let pre_proc = pre_process cil_file eba_file in
+  full_function_trace pre_proc 1
+
+  (********* Full traces of all functions ************)
+
+  
   (*let rec print_list str_list = match str_list with
     |s::rs -> Printf.printf "%s\n" s; print_list rs
     |[] -> ()

@@ -443,6 +443,7 @@ let rec lock_unlock_calls stmts eba_fun =
 type function_query_info =
   {
     name : string;
+    filename : string;
     cfg : eba_cfg_node list;
     stmts : (int * Cil.stmt list) list;
     eba_fun : Abs.AFun.t;
@@ -458,7 +459,7 @@ cfg : The CFG of the function
 stmts: The statements/basic block
 eba_fun: The Eba's abstraction of the function
  ****************************************************************)
-let process_functions cil_file eba_file =
+let process_functions cil_file eba_file gcc_filename =
   (*Functions holder table*)
   let function_table = Hashtbl.create 300 in
   Cil.iterGlobals cil_file (fun g ->
@@ -469,7 +470,8 @@ let process_functions cil_file eba_file =
           (*Find eba's function abstraction*)
           match f with
           |Some(_,ebaFun) -> Hashtbl.add function_table fd.svar.vname
-                               {name=fd.svar.vname;cfg=cfg_root;stmts=stmts_list;eba_fun=ebaFun;
+                               {name=fd.svar.vname; filename = gcc_filename;cfg=cfg_root;
+                                stmts=stmts_list;eba_fun=ebaFun;
                                 lock_unlocks=[];full_traces = []; stmts_per_trace = []}
           |None -> raise Not_found (*Should never happen*)
          )
@@ -743,7 +745,8 @@ let rec inline_traces traces depth_level funs_dir =
 let rec is_clean_trace list_of_lock_ops trace =
 
   let rec check_trace (l,u) tr = match tr with
-    |[] -> true
+    |[] -> false
+    |x::[] -> if x = l || x = u then false else true
     |x::xs -> if x = l || x = u then false else check_trace (l,u) xs in
 
   match list_of_lock_ops with
@@ -775,16 +778,14 @@ let lock_unlock_qry_proc queries_list funs_dir inline_depth =
             let trimmed_traces = List.map (fun tr -> if List.length tr <= 2 then [] else List.tl(List.rev(List.tl tr))) traces in
             let clean_traces = List.map (is_clean_trace other_locks) trimmed_traces  in
             let to_check = List.combine clean_traces traces in
-            List.iter (fun (valid,trace) -> match valid with
-                                            | true -> (
-                                              let stmts_per_trace = statements_for_trace trace fun_info.stmts in
-                                              let inlined_traces = inline_traces [stmts_per_trace] inline_depth funs_dir in
-          (*let st ="Total number for traces: "^ string_of_int (List.length inlined_traces) ^"\n" ^
-          "Total number of stmts: "^ string_of_int (List.fold_left (+) 0 (List.map (List.length) inlined_traces)) in*)
-                                              string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
-                                            );
-                                            | _ -> () ) to_check;
-
+            List.iter (fun (valid,trace) ->
+                match valid with
+                | true -> (
+                  let stmts_per_trace = statements_for_trace trace fun_info.stmts in
+                  let inlined_traces = inline_traces [stmts_per_trace] inline_depth funs_dir in
+                  string_of_traces inlined_traces fun_info.eba_fun funs_dir (fun_info.filename ^ "_" ^ fun_info.name);
+                );
+                | _ -> () ) to_check;
             process_function_queries_aux rs
           )
       |[] -> ()
@@ -816,7 +817,7 @@ let full_function_trace funs_dir inline_depth =
           (*let st ="Total number for traces: "^ string_of_int (List.length inlined_traces) ^"\n" ^
           "Total number of stmts: "^ string_of_int (List.fold_left (+) 0 (List.map (List.length) inlined_traces)) in*)
 
-        string_of_traces inlined_traces fun_info.eba_fun funs_dir fun_info.name;
+        string_of_traces inlined_traces fun_info.eba_fun funs_dir (fun_info.filename ^ "_" ^ fun_info.name);
       ) in
   (*List.map process_function_queries queries_list*)
   let rec l_u_aux ql = match ql with
@@ -835,8 +836,8 @@ let full_function_trace funs_dir inline_depth =
   
 (**************************************** Query pre-processing ****************************************)
 (* Pre-process all the functions for queries *)
-let pre_process cil_file eba_file =
-  process_functions cil_file eba_file
+let pre_process cil_file eba_file gcc_filename =
+  process_functions cil_file eba_file gcc_filename
 
 (************************************* End: Query pre-processing **************************************)  
 
@@ -846,20 +847,20 @@ let pre_process cil_file eba_file =
 let lock_release_query cil_file gcc_filename eba_file =
 
   (********* Critical region traces generator ************)
-  (*let pre_proc = pre_process cil_file eba_file in
+  let pre_proc = pre_process cil_file eba_file gcc_filename in
   let uq = lock_unlock_queries pre_proc in
-  lock_unlock_qry_proc uq pre_proc 1*)
+  lock_unlock_qry_proc uq pre_proc 1
   (********* End: Critical region traces generator ************)
   
   (********* Full traces of functions with locking operations ************)
-  (*let pre_proc = get_interesting_funs (pre_process cil_file eba_file) in
+  (*let pre_proc = get_interesting_funs (pre_process cil_file eba_file gcc_filename) in
   full_function_trace pre_proc 2*)
   (********* End: Full traces of functions with locking operations ************)
 
   (********* Full traces of all functions ************)
 
-  let pre_proc = pre_process cil_file eba_file in
-  full_function_trace pre_proc 1
+  (*let pre_proc = pre_process cil_file eba_file gcc_filename in
+  full_function_trace pre_proc 1*)
 
   (********* Full traces of all functions ************)
 

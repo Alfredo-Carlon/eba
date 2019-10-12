@@ -561,7 +561,8 @@ let string_of_traces traces ebaFun fun_dir fun_name =
 
 (******** End: Returns a string of all the effects of all the given traces ********)  
       
-(**************************************** Functions traces and effects dump ****************************************)
+(*********************** Functions traces and effects dump ***********************)
+
 let traces_effects_for_fun fun_name fun_dir =
   let fun_desc = Hashtbl.find fun_dir fun_name in
   if not (List.is_empty fun_desc.cfg) && List.is_empty fun_desc.full_traces then
@@ -572,10 +573,7 @@ let traces_effects_for_fun fun_name fun_dir =
     ) else ();
   fun_desc.stmts_per_trace
 
-
-
-
-(**************************************** End: Functions traces and effects dump ****************************************)  
+(*********************** End: Functions traces and effects dump ***********************)
 
 
   
@@ -590,7 +588,46 @@ let effects_for_trace eba_fun (statements:(int * Cil.stmt list) list) =
       List.map (fun (s:Cil.stmt) ->
           AFun.effect_of_expr eba_fun (Cil.get_stmtLoc s.skind)) bb_statements)
 
-  
+
+(****************************************************************
+Returns the list of variables ocurring in an expression
+TODO: To be Cil-ish we should change this to visitors as well
+as other functions
+*****************************************************************)
+let variables_in_expr (expr:Cil.exp):Cil.varinfo list =
+  let rec vars_in_expr (expr:Cil.exp) acc =
+    match expr with
+    | (*LVal*) Cil.Lval (h,_o) -> (
+       match h with
+       | Cil.Var v -> v :: acc
+       | Cil.Mem m -> vars_in_expr m acc
+    )
+    | (*SizeOf*) SizeOf (Cil.TArray (_,Some e,_)) -> vars_in_expr e acc
+    | (*SizeOfE*) SizeOfE e -> vars_in_expr e acc
+    | (*AlignOf*) AlignOf (Cil.TArray (_,Some e,_)) -> vars_in_expr e acc
+    | (*AlignOfE*) AlignOfE e -> vars_in_expr e acc
+    | (*UnOp*) UnOp (_unop, e, _typ) -> vars_in_expr e acc
+    | (*BinOp*) BinOp (_binop,e1, e2, _type) ->
+       let acc1 = vars_in_expr e1 acc in
+       vars_in_expr e2 acc1
+    | (*Question*) Question(e1, e2, e3, _type) ->
+       let acc1 = vars_in_expr e1 acc in
+       let acc2 = vars_in_expr e2 acc1 in
+       vars_in_expr e3 acc2
+    | (*CastE*) CastE(_type, e) -> vars_in_expr e acc
+    | (*AddrOf*) AddrOf (h,_o) -> (
+       match h with
+       | Cil.Var v -> v :: acc
+       | Cil.Mem m -> vars_in_expr m acc
+    )
+    | (*StartOf*) StartOf (h,_o) -> (
+      match h with
+       | Cil.Var v -> v :: acc
+       | Cil.Mem m -> vars_in_expr m acc
+    )
+    | _ -> [] in
+  vars_in_expr expr []
+                        
 (****************************************************************
 Process a function to calculate its locks and unlocks nodes, its traces 
  *****************************************************************)
@@ -847,9 +884,9 @@ let pre_process cil_file eba_file gcc_filename =
 let lock_release_query cil_file gcc_filename eba_file =
 
   (********* Critical region traces generator ************)
-  let pre_proc = pre_process cil_file eba_file gcc_filename in
+  (*let pre_proc = pre_process cil_file eba_file gcc_filename in
   let uq = lock_unlock_queries pre_proc in
-  lock_unlock_qry_proc uq pre_proc 1
+  lock_unlock_qry_proc uq pre_proc 1 *)
   (********* End: Critical region traces generator ************)
   
   (********* Full traces of functions with locking operations ************)
@@ -859,11 +896,15 @@ let lock_release_query cil_file gcc_filename eba_file =
 
   (********* Full traces of all functions ************)
 
-  (*let pre_proc = pre_process cil_file eba_file gcc_filename in
-  full_function_trace pre_proc 1*)
+  let pre_proc = pre_process cil_file eba_file gcc_filename in
+  full_function_trace pre_proc 1
 
-  (********* Full traces of all functions ************)
+  (********* End: Full traces of all functions ************)
 
+  (********* Annotated stuff ************)
+  
+
+  (********* End: Annotated stuff ************)
   
   (*let rec print_list str_list = match str_list with
     |s::rs -> Printf.printf "%s\n" s; print_list rs
